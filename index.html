@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>海巡署東部分署 - 救生救難大數據與軌跡分析平台</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- PapaParse (解析 CSV) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <!-- SheetJS (解析 Excel) -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        /* 響應式地圖高度：手機較矮、桌面全螢幕扣除標頭 */
+        #map { height: 350px; background: #0f172a; }
+        @media (min-width: 768px) {
+            #map { height: calc(100vh - 140px); }
+        }
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+        .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+            background: #1e293b !important;
+            color: #f8fafc !important;
+            border: 1px solid #334155;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased flex flex-col min-h-screen md:h-screen overflow-x-hidden md:overflow-hidden">
+
+    <!-- 頂部戰情列 (支援手機平板自動縮放) -->
+    <header class="bg-slate-900 border-b border-slate-800 py-3 px-4 md:px-6 flex flex-col md:flex-row justify-between items-center shrink-0 shadow-xl z-30 gap-3">
+        <div class="flex items-center gap-3 w-full md:w-auto justify-between md:justify-start">
+            <div class="flex items-center gap-2">
+                <div class="bg-blue-600 p-2 rounded-lg text-white font-bold text-sm shadow-lg shadow-blue-500/20">⚓</div>
+                <div>
+                    <h1 class="text-xs md:text-sm font-bold tracking-wider text-slate-100">海巡署東部分署</h1>
+                    <p class="text-[10px] md:text-[11px] text-slate-400">救生救難軌跡查詢系統</p>
+                </div>
+            </div>
+            <!-- 手機版狀態顯示 -->
+            <span id="dataStatusMobile" class="md:hidden text-[10px] px-2.5 py-0.5 bg-emerald-950 text-emerald-300 rounded-full border border-emerald-800">就緒</span>
+        </div>
+
+        <!-- 數據來源控制區 -->
+        <div class="flex items-center gap-2 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
+            <button onclick="loadDefaultData()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition shrink-0 shadow flex items-center gap-1">
+                <span>⚡ 內建資料(12筆)</span>
+            </button>
+            <input type="text" id="sheetUrlInput" 
+                placeholder="Google 試算表共用連結..." 
+                class="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500 w-40 md:w-64">
+            <button onclick="loadGoogleSheet()" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition shrink-0 shadow">
+                <span>載入</span>
+            </button>
+            <label class="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition shrink-0">
+                📁 上傳
+                <input type="file" id="fileUpload" class="hidden" accept=".csv, .xlsx, .xls" onchange="handleFileUpload(event)">
+            </label>
+        </div>
+
+        <div class="hidden md:block shrink-0">
+            <span id="dataStatus" class="text-xs px-3 py-1 bg-emerald-950 text-emerald-300 rounded-full border border-emerald-800">就緒</span>
+        </div>
+    </header>
+
+    <!-- 核心排版區：平板/手機上下堆疊，桌面左右分欄 -->
+    <div class="flex flex-col md:flex-row flex-1 overflow-y-auto md:overflow-hidden">
+        
+        <!-- 左側：篩選面板與案件清單 (手機平板寬度自適應) -->
+        <aside class="w-full md:w-96 bg-slate-900/95 border-b md:border-b-0 md:border-r border-slate-800 flex flex-col shrink-0 z-20">
+            <!-- 交叉分析篩選器 -->
+            <div class="p-3 md:p-4 border-b border-slate-800 space-y-2">
+                <h2 class="text-xs font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1">
+                    <span>🔍</span> 多維度交叉分析篩選
+                </h2>
+                <div class="grid grid-cols-2 gap-2">
+                    <select id="filterYear" class="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded p-2 focus:outline-none focus:border-blue-500" onchange="filterData()">
+                        <option value="">全部年份</option>
+                    </select>
+                    <select id="filterMonth" class="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded p-2 focus:outline-none focus:border-blue-500" onchange="filterData()">
+                        <option value="">全部月份</option>
+                    </select>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <select id="filterRegion" class="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded p-2 focus:outline-none focus:border-blue-500" onchange="filterData()">
+                        <option value="">全部區域/地點</option>
+                    </select>
+                    <select id="filterResult" class="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded p-2 focus:outline-none focus:border-blue-500" onchange="filterData()">
+                        <option value="">全部處置結果</option>
+                        <option value="生還">生還</option>
+                        <option value="死亡">死亡</option>
+                        <option value="未尋獲">未尋獲</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- 案件清單區 -->
+            <div class="p-3 md:p-4 flex flex-col h-60 md:h-auto md:flex-1 overflow-hidden">
+                <div class="flex justify-between items-center mb-2">
+                    <h2 class="text-xs font-bold uppercase tracking-wider text-slate-400">案件檢索清單</h2>
+                    <span id="caseCount" class="text-xs bg-slate-800 border border-slate-700 px-2 py-0.5 rounded text-blue-300 font-mono">0 筆</span>
+                </div>
+                <div id="caseListContainer" class="flex-1 overflow-y-auto space-y-2 pr-1">
+                    <div class="text-center py-12 text-slate-500 text-xs">
+                        請點擊上方按鈕載入資料
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 中央：地圖與下方小圖表 -->
+        <main class="flex-1 flex flex-col relative bg-slate-950">
+            <!-- 互動地圖容器 -->
+            <div id="map" class="w-full shrink-0 md:flex-1 z-10"></div>
+
+            <!-- 下方統計圖表列 (平板手機適應左右或堆疊) -->
+            <div class="h-auto md:h-44 bg-slate-900 border-t border-slate-800 p-3 grid grid-cols-1 md:grid-cols-2 gap-4 shrink-0 z-20">
+                <div class="bg-slate-800/40 border border-slate-800 rounded-lg p-2 flex flex-col h-36 md:h-auto">
+                    <span class="text-[11px] font-semibold text-slate-400 mb-1">📊 處置結果分佈比例</span>
+                    <div class="flex-1 relative flex items-center justify-center">
+                        <canvas id="resultChart"></canvas>
+                    </div>
+                </div>
+                <div class="bg-slate-800/40 border border-slate-800 rounded-lg p-2 flex flex-col h-36 md:h-auto">
+                    <span class="text-[11px] font-semibold text-slate-400 mb-1">📈 各月份案件趨勢統計</span>
+                    <div class="flex-1 relative flex items-center justify-center">
+                        <canvas id="monthChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 完整案件詳細卡片 Modal (精簡為地點、耗時、結果) -->
+    <div id="caseModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center z-50 p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+            <div class="bg-slate-800 px-5 py-3.5 flex justify-between items-center border-b border-slate-700">
+                <h3 class="text-xs font-bold text-blue-400 tracking-wider flex items-center gap-2">📋 案件精要摘要卡片</h3>
+                <button onclick="closeModal()" class="text-slate-400 hover:text-white text-lg font-bold">&times;</button>
+            </div>
+            <div id="modalContent" class="p-5 overflow-y-auto space-y-3 text-xs text-slate-300 divide-y divide-slate-800">
+                <!-- 動態填入 -->
+            </div>
+            <div class="bg-slate-800 px-5 py-3 border-t border-slate-700 flex justify-end gap-2">
+                <button id="zoomModalBtn" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs transition">定位至此區域</button>
+                <button onclick="closeModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded text-xs transition">關閉</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let map;
+        let layerGroup = L.layerGroup();
+        let rawData = [];
+        let filteredData = [];
+        let resultChartInstance = null;
+        let monthChartInstance = null;
+
+        window.addEventListener('DOMContentLoaded', () => {
+            map = L.map('map', {
+                center: [23.3, 121.4],
+                zoom: 9,
+                zoomControl: false
+            });
+
+            const esriTileLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 19,
+                attribution: 'Tiles &copy; Esri'
+            });
+            esriTileLayer.addTo(map);
+            L.control.zoom({ position: 'topright' }).addTo(map);
+            layerGroup.addTo(map);
+
+            loadDefaultData();
+        });
+
+        function loadDefaultData() {
+            rawData = [
+                {"發生日期/年": 114, "發生日期/月": 6, "發生日期/日": 2, "發生日期/時": "15:53:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 6, "結案(尋獲)時間/日": 3, "結案(尋獲)時間/時": "10:58:00", "落水(獲報)地點/地名": "台東都歷大灣", "落水(獲報)地點/經度": 121.3346607, "落水(獲報)地點/緯度": 23.0215436, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "台東都歷大灣", "尋獲地點/經度": 121.34361, "尋獲地點/緯度": 23.04805},
+                {"發生日期/年": 115, "發生日期/月": 1, "發生日期/日": 3, "發生日期/時": "09:02:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 1, "結案(尋獲)時間/日": 3, "結案(尋獲)時間/時": "09:21:00", "落水(獲報)地點/地名": "台東烏石鼻鼻頭", "落水(獲報)地點/經度": 121.4189486, "落水(獲報)地點/緯度": 23.2283613, "遇險人數": 1, "處置結果": "生還", "尋獲地點/地名": "台東烏石鼻鼻頭", "尋獲地點/經度": 121.4189486, "尋獲地點/緯度": 23.2283613},
+                {"發生日期/年": 115, "發生日期/月": 1, "發生日期/日": 25, "發生日期/時": "16:26:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 1, "結案(尋獲)時間/日": 25, "結案(尋獲)時間/時": "17:20:00", "落水(獲報)地點/地名": "台東金樽港嘴前0.3浬", "落水(獲報)地點/經度": 121.29117, "落水(獲報)地點/緯度": 22.9518023, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "台東金樽漁港觀景平臺北岸300公尺處", "尋獲地點/經度": 121.2825682, "尋獲地點/緯度": 22.9475646},
+                {"發生日期/年": 115, "發生日期/月": 1, "發生日期/日": 31, "發生日期/時": "05:57:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 1, "結案(尋獲)時間/日": 31, "結案(尋獲)時間/時": "06:33:00", "落水(獲報)地點/地名": "台東金樽漁港", "落水(獲報)地點/經度": 121.2932873, "落水(獲報)地點/緯度": 22.9548983, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "台東金樽漁港", "尋獲地點/經度": 121.2932873, "尋獲地點/緯度": 22.9548983},
+                {"發生日期/年": 115, "發生日期/月": 2, "發生日期/日": 28, "發生日期/時": "09:36:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 2, "結案(尋獲)時間/日": 28, "結案(尋獲)時間/時": "10:02:00", "落水(獲報)地點/地名": "花蓮美崙溪口距岸際約200公尺", "落水(獲報)地點/經度": 121.6207632, "落水(獲報)地點/緯度": 23.9760302, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "花蓮美崙溪口距岸際約200公尺", "尋獲地點/經度": 121.6207632, "尋獲地點/緯度": 23.9760302},
+                {"發生日期/年": 115, "發生日期/月": 3, "發生日期/日": 23, "發生日期/時": "17:00:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 3, "結案(尋獲)時間/日": 23, "結案(尋獲)時間/時": "19:35:00", "落水(獲報)地點/地名": "台東綠島朝日溫泉", "落水(獲報)地點/經度": 121.5050635, "落水(獲報)地點/緯度": 22.6376663, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "台東綠島溫泉港東方0.4浬", "尋獲地點/經度": 121.5125, "尋獲地點/緯度": 22.64583},
+                {"發生日期/年": 115, "發生日期/月": 4, "發生日期/日": 13, "發生日期/時": "00:33:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 4, "結案(尋獲)時間/日": 13, "結案(尋獲)時間/時": "09:48:00", "落水(獲報)地點/地名": "花蓮石門班哨角", "落水(獲報)地點/經度": 121.5029998, "落水(獲報)地點/緯度": 23.5201832, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "花蓮石門班哨角", "尋獲地點/經度": 121.5029998, "尋獲地點/緯度": 23.5201832},
+                {"發生日期/年": 115, "發生日期/月": 4, "發生日期/日": 25, "發生日期/時": "23:16:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 4, "結案(尋獲)時間/日": 25, "結案(尋獲)時間/時": "23:22:00", "落水(獲報)地點/地名": "台東金樽漁港", "落水(獲報)地點/經度": 121.2932873, "落水(獲報)地點/緯度": 22.9548983, "遇險人數": 1, "處置結果": "生還", "尋獲地點/地名": "台東金樽漁港", "尋獲地點/經度": 121.2932873, "尋獲地點/緯度": 22.9548983},
+                {"發生日期/年": 115, "發生日期/月": 6, "發生日期/日": 7, "發生日期/時": "17:02:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 6, "結案(尋獲)時間/日": 7, "結案(尋獲)時間/時": "17:07:00", "落水(獲報)地點/地名": "台東伽藍漁港", "落水(獲報)地點/經度": 121.1932922, "落水(獲報)地點/緯度": 22.7912877, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "台東伽藍漁港", "尋獲地點/經度": 121.1932922, "尋獲地點/緯度": 22.7912877},
+                {"發生日期/年": 115, "發生日期/月": 8, "發生日期/日": 26, "發生日期/時": "11:06:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 8, "結案(尋獲)時間/日": 28, "結案(尋獲)時間/時": "06:30:00", "落水(獲報)地點/地名": "台東蘭嶼坦克岩", "落水(獲報)地點/經度": 121.5059603, "落水(獲報)地點/緯度": 22.0876807, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "台東蘭嶼五孔洞", "尋獲地點/經度": 121.5118977, "尋獲地點/緯度": 22.0812171},
+                {"發生日期/年": 115, "發生日期/月": 9, "發生日期/日": 6, "發生日期/時": "04:20:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 9, "結案(尋獲)時間/日": 6, "結案(尋獲)時間/時": "05:02:00", "落水(獲報)地點/地名": "台東綠島南寮漁港紅燈塔", "落水(獲報)地點/經度": 121.4717022, "落水(獲報)地點/緯度": 22.6597682, "遇險人數": 1, "處置結果": "生還", "尋獲地點/地名": "台東綠島南寮漁港紅燈塔", "尋獲地點/經度": 121.4717022, "尋獲地點/緯度": 22.6597682},
+                {"發生日期/年": 115, "發生日期/月": 9, "發生日期/日": 25, "發生日期/時": "18:29:00", "結案(尋獲)時間/年": 115, "結案(尋獲)時間/月": 9, "結案(尋獲)時間/日": 28, "結案(尋獲)時間/時": "11:59:00", "落水(獲報)地點/地名": "台東隆昌海灘(東河品珍燒臘)", "落水(獲報)地點/經度": 121.273969, "落水(獲報)地點/緯度": 22.923709, "遇險人數": 1, "處置結果": "死亡", "尋獲地點/地名": "台東都歷大灣", "尋獲地點/經度": 121.34361, "尋獲地點/緯度": 23.04805}
+            ];
+            filteredData = [...rawData];
+            updateSystemState(`已載入內建資料庫 (${rawData.length}筆)`);
+        }
+
+        function loadGoogleSheet() {
+            const url = document.getElementById('sheetUrlInput').value.trim();
+            if (!url) { alert('請輸入連結！'); return; }
+            let csvUrl = url;
+            const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
+            if (match && match[1]) {
+                csvUrl = `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv`;
+            }
+            Papa.parse(csvUrl, {
+                download: true, header: true, skipEmptyLines: true,
+                complete: function(results) {
+                    rawData = results.data;
+                    filteredData = [...rawData];
+                    updateSystemState(`試算表同步成功 (${rawData.length}筆)`);
+                },
+                error: function(err) { alert('讀取失敗，請確認共用權限。'); }
+            });
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            if (file.name.endsWith('.csv')) {
+                reader.onload = function(e) {
+                    Papa.parse(e.target.result, {
+                        header: true, skipEmptyLines: true,
+                        complete: function(results) {
+                            rawData = results.data;
+                            filteredData = [...rawData];
+                            updateSystemState(`檔案載入成功 (${rawData.length}筆)`);
+                        }
+                    });
+                };
+                reader.readAsText(file);
+            } else {
+                reader.onload = function(e) {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    rawData = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+                    filteredData = [...rawData];
+                    updateSystemState(`Excel 載入成功 (${rawData.length}筆)`);
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        }
+
+        function updateSystemState(msg) {
+            document.getElementById('dataStatus').innerText = msg;
+            document.getElementById('dataStatusMobile').innerText = "就緒";
+            initFilters();
+            updateVisualization();
+        }
+
+        function initFilters() {
+            const years = [...new Set(rawData.map(i => i['發生日期/年']))].filter(Boolean).sort();
+            const months = [...new Set(rawData.map(i => i['發生日期/月']))].filter(Boolean).sort((a,b)=>a-b);
+            const regions = [...new Set(rawData.map(i => i['落水(獲報)地點/地名']))].filter(Boolean);
+
+            populateSelect('filterYear', years, '全部年份');
+            populateSelect('filterMonth', months, '全部月份');
+            populateSelect('filterRegion', regions, '全部區域');
+        }
+
+        function populateSelect(elementId, options, defaultText) {
+            const el = document.getElementById(elementId);
+            el.innerHTML = `<option value="">${defaultText}</option>` + 
+                options.map(opt => `<option value="${opt}">${opt}</option>`).join('');
+        }
+
+        function filterData() {
+            const year = document.getElementById('filterYear').value;
+            const month = document.getElementById('filterMonth').value;
+            const region = document.getElementById('filterRegion').value;
+            const result = document.getElementById('filterResult').value;
+
+            filteredData = rawData.filter(item => {
+                return (!year || item['發生日期/年'] == year) &&
+                       (!month || item['發生日期/月'] == month) &&
+                       (!region || item['落水(獲報)地點/地名'] == region) &&
+                       (!result || item['處置結果'] == result);
+            });
+
+            updateVisualization();
+        }
+
+        // 計算耗時 (起訖時間相減)
+        function calculateDuration(item) {
+            try {
+                const startYear = 1911 + parseInt(item['發生日期/年'] || 0);
+                const endYear = 1911 + parseInt(item['結案(尋獲)時間/年'] || 0);
+                const startDate = new Date(startYear, (item['發生日期/月'] || 1) - 1, item['發生日期/日'] || 1, ...((item['發生日期/時'] || '00:00:00').split(':')) );
+                const endDate = new Date(endYear, (item['結案(尋獲)時間/月'] || 1) - 1, item['結案(尋獲)時間/日'] || 1, ...((item['結案(尋獲)時間/時'] || '00:00:00').split(':')) );
+                
+                const diffMs = endDate - startDate;
+                if (diffMs < 0) return "計算中/時序異常";
+                const diffHrs = (diffMs / (1000 * 60 * 60)).toFixed(1);
+                if (diffHrs < 24) {
+                    return `${diffHrs} 小時`;
+                } else {
+                    const diffDays = (diffHrs / 24).toFixed(1);
+                    return `${diffDays} 天 (${diffHrs} 小時)`;
+                }
+            } catch(e) {
+                return "時間格式無法解析";
+            }
+        }
+
+        function updateVisualization() {
+            layerGroup.clearLayers();
+            renderCaseList();
+            renderCharts();
+
+            document.getElementById('caseCount').innerText = `${filteredData.length} 筆`;
+
+            let bounds = [];
+
+            filteredData.forEach(item => {
+                const fLat = parseFloat(item['落水(獲報)地點/緯度']);
+                const fLng = parseFloat(item['落水(獲報)地點/經度']);
+                const rLat = parseFloat(item['尋獲地點/緯度']);
+                const rLng = parseFloat(item['尋獲地點/經度']);
+
+                if (!isNaN(fLat) && !isNaN(fLng)) {
+                    bounds.push([fLat, fLng]);
+
+                    const fallMarker = L.circleMarker([fLat, fLng], {
+                        radius: 6,
+                        fillColor: '#3b82f6',
+                        color: '#ffffff',
+                        weight: 1.5,
+                        opacity: 1,
+                        fillOpacity: 0.9
+                    }).bindTooltip(`落水: ${item['落水(獲報)地點/地名'] || ''}`);
+
+                    fallMarker.on('click', () => zoomToCase(fLat, fLng, rLat, rLng, item));
+                    layerGroup.addLayer(fallMarker);
+
+                    if (!isNaN(rLat) && !isNaN(rLng)) {
+                        bounds.push([rLat, rLng]);
+                        const colorMap = { '生還': '#10b981', '死亡': '#ef4444', '未尋獲': '#f59e0b' };
+                        const foundColor = colorMap[item['處置結果']] || '#94a3b8';
+
+                        const foundMarker = L.circleMarker([rLat, rLng], {
+                            radius: 6,
+                            fillColor: foundColor,
+                            color: '#ffffff',
+                            weight: 1.5,
+                            opacity: 1,
+                            fillOpacity: 0.9
+                        }).bindTooltip(`尋獲: ${item['尋獲地點/地名'] || ''} (${item['處置結果']})`);
+
+                        foundMarker.on('click', () => zoomToCase(fLat, fLng, rLat, rLng, item));
+                        layerGroup.addLayer(foundMarker);
+
+                        const polyline = L.polyline([[fLat, fLng], [rLat, rLng]], {
+                            color: foundColor,
+                            weight: 2,
+                            opacity: 0.7,
+                            dashArray: '5, 5'
+                        });
+                        layerGroup.addLayer(polyline);
+                    }
+                }
+            });
+
+            if (bounds.length > 0) {
+                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 13 });
+            }
+        }
+
+        // 點擊案件：縮放至該案件區域並顯示精簡卡片
+        function zoomToCase(fLat, fLng, rLat, rLng, item) {
+            let latlngs = [[fLat, fLng]];
+            if (!isNaN(rLat) && !isNaN(rLng)) latlngs.push([rLat, rLng]);
+            
+            if (latlngs.length > 1) {
+                map.fitBounds(latlngs, { padding: [100, 100], maxZoom: 15 });
+            } else {
+                map.setView([fLat, fLng], 14);
+            }
+            showCaseCard(item);
+        }
+
+        function renderCaseList() {
+            const container = document.getElementById('caseListContainer');
+            if (filteredData.length === 0) {
+                container.innerHTML = `<div class="text-center py-12 text-slate-500 text-xs">無符合條件的案件記錄</div>`;
+                return;
+            }
+
+            container.innerHTML = filteredData.map((item) => {
+                const duration = calculateDuration(item);
+                const badgeColor = item['處置結果'] === '生還' ? 'bg-emerald-950 text-emerald-300 border-emerald-800' : 'bg-rose-950 text-rose-300 border-rose-800';
+                
+                const fLat = parseFloat(item['落水(獲報)地點/緯度']);
+                const fLng = parseFloat(item['落水(獲報)地點/經度']);
+                const rLat = parseFloat(item['尋獲地點/緯度']);
+                const rLng = parseFloat(item['尋獲地點/經度']);
+
+                return `
+                    <div onclick='zoomToCase(${fLat}, ${fLng}, ${rLat}, ${rLng}, ${JSON.stringify(item)})' class="bg-slate-900 hover:bg-slate-800 border border-slate-800/80 p-2.5 rounded-lg cursor-pointer transition shadow-sm space-y-1">
+                        <div class="flex justify-between items-center">
+                            <span class="font-bold text-slate-200 text-xs">📅 民國${item['發生日期/年']}年${item['發生日期/月']}月</span>
+                            <span class="px-2 py-0.5 rounded text-[10px] border ${badgeColor}">${item['處置結果'] || '未明'}</span>
+                        </div>
+                        <p class="text-slate-300 text-[11px] truncate">📍 落水：${item['落水(獲報)地點/地名'] || '無紀錄'}</p>
+                        <p class="text-slate-300 text-[11px] truncate">🎯 尋獲：${item['尋獲地點/地名'] || '同落水點'}</p>
+                        <p class="text-blue-400 text-[10px]">⏱️ 耗時：${duration}</p>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // 僅呈現地點、耗時及結果
+        function showCaseCard(item) {
+            const duration = calculateDuration(item);
+            const content = document.getElementById('modalContent');
+            
+            content.innerHTML = `
+                <div class="flex py-2 justify-between items-center">
+                    <span class="font-medium text-slate-400 w-1/3">📍 落水地點</span>
+                    <span class="text-slate-100 w-2/3 text-right">${item['落水(獲報)地點/地名'] || '無紀錄'}</span>
+                </div>
+                <div class="flex py-2 justify-between items-center">
+                    <span class="font-medium text-slate-400 w-1/3">🎯 尋獲地點</span>
+                    <span class="text-slate-100 w-2/3 text-right">${item['尋獲地點/地名'] || '同落水點'}</span>
+                </div>
+                <div class="flex py-2 justify-between items-center">
+                    <span class="font-medium text-slate-400 w-1/3">⏱️ 搜救耗時</span>
+                    <span class="text-blue-400 font-bold w-2/3 text-right font-mono">${duration}</span>
+                </div>
+                <div class="flex py-2 justify-between items-center">
+                    <span class="font-medium text-slate-400 w-1/3">📌 處置結果</span>
+                    <span class="text-slate-100 w-2/3 text-right font-bold ${item['處置結果'] === '生還' ? 'text-emerald-400' : 'text-rose-400'}">${item['處置結果'] || '未明'}</span>
+                </div>
+                <div class="flex py-2 justify-between items-center">
+                    <span class="font-medium text-slate-400 w-1/3">👥 遇險人數</span>
+                    <span class="text-slate-100 w-2/3 text-right font-mono">${item['遇險人數'] || 1} 人</span>
+                </div>
+            `;
+
+            const fLat = parseFloat(item['落水(獲報)地點/緯度']);
+            const fLng = parseFloat(item['落水(獲報)地點/經度']);
+            const rLat = parseFloat(item['尋獲地點/緯度']);
+            const rLng = parseFloat(item['尋獲地點/經度']);
+            document.getElementById('zoomModalBtn').onclick = function() {
+                zoomToCase(fLat, fLng, rLat, rLng, item);
+                closeModal();
+            };
+
+            document.getElementById('caseModal').classList.remove('hidden');
+        }
+
+        function closeModal() {
+            document.getElementById('caseModal').classList.add('hidden');
+        }
+
+        function renderCharts() {
+            const resultCounts = { '生還': 0, '死亡': 0, '未尋獲': 0 };
+            filteredData.forEach(item => {
+                if (resultCounts[item['處置結果']] !== undefined) resultCounts[item['處置結果']]++;
+            });
+
+            const ctx1 = document.getElementById('resultChart').getContext('2d');
+            if (resultChartInstance) resultChartInstance.destroy();
+            resultChartInstance = new Chart(ctx1, {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(resultCounts),
+                    datasets: [{
+                        data: Object.values(resultCounts),
+                        backgroundColor: ['#10b981', '#ef4444', '#f59e0b'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right', labels: { color: '#cbd5e1', boxWidth: 10, font: { size: 10 } } } }
+                }
+            });
+
+            const monthCounts = {};
+            filteredData.forEach(item => {
+                const m = item['發生日期/月'] ? `${item['發生日期/月']}月` : '未知';
+                monthCounts[m] = (monthCounts[m] || 0) + 1;
+            });
+
+            const ctx2 = document.getElementById('monthChart').getContext('2d');
+            if (monthChartInstance) monthChartInstance.destroy();
+            monthChartInstance = new Chart(ctx2, {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(monthCounts),
+                    datasets: [{
+                        label: '案件數',
+                        data: Object.values(monthCounts),
+                        backgroundColor: '#3b82f6',
+                        borderRadius: 3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { display: false } },
+                        y: { ticks: { color: '#94a3b8', font: { size: 9 }, stepSize: 1 }, grid: { color: '#1e293b' } }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
